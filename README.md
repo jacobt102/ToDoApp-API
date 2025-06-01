@@ -30,7 +30,7 @@ A robust RESTful Task Management API built with **FastAPI**, **MySQL**, and **Py
 | PATCH  | `/tasks/{id}`       | Update task name/status                |
 | DELETE | `/tasks/{id}`       | Delete a task by ID                    |
 
-## 📂 Setup Instructions
+## Setup Instructions
 
 1. Clone the repository
 2. Create a `.env` file in the project root with the following:
