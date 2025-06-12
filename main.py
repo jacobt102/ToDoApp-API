@@ -22,6 +22,7 @@ if host is None or user is None or password is None or database is None:
     raise HTTPException(status_code=500, detail="Missing environment variable")
 
 def db_connection():
+
    try:
        conn = mysql.connector.connect(
         host=host,
@@ -168,7 +169,7 @@ def get_task(task_id: int) -> TaskResponse:
         raise HTTPException(status_code=500, detail=f"Database constraint violation: {e}")
 
 @app.get("/tasks", response_model=list[TaskResponse])
-def get_tasks(search: str = None) -> list[TaskResponse]:
+def get_tasks(search: str = None) -> list[TaskResponse] | None:
     """
     Get all tasks from the database, or search by a specific task name.
 
@@ -203,7 +204,7 @@ def get_tasks(search: str = None) -> list[TaskResponse]:
     return [TaskResponse(id=row[0],name=row[1],status=row[2]) for row in results]
 
 @app.patch("/tasks/{task_id}", response_model=TaskResponse)
-def update_task(task_id: int, task: Task) -> TaskResponse:
+def update_task(task_id: int, task: Task) -> TaskResponse | None:
     """
     Update a specific task by ID in the database.
 
