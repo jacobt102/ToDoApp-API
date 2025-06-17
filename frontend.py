@@ -2,35 +2,41 @@ from taipy.gui import Gui, Markdown, State
 import taipy.gui.builder as tgb
 import requests
 import pandas as pd
+import time
+import threading
 
 
-task_input =""
+task_name = ""
+task_status = False
+
 #Empty Dataframe
 tasks=pd.DataFrame(columns=["ID","Task Name","Status"])
 
-def add_task(state: State,var_name: str,payload: dict):
+def add_task(state: State,id: str,payload: dict):
     """
     Adds a new task to the task API.
 
     Args:
-    :param var_name: Necessary for action
     :param state: Used for GUI
+    :param id: Unused
     :param payload: Carries data about event that caused the action
     :return: JSON response
     """
     try:
 
 
-        response = requests.post("http://127.0.0.1:8001/addtask", json={"task_name": state.task_input, "status": False})
+        response = requests.post("http://127.0.0.1:8001/addtask", json={"name": state.task_name, "status": bool(state.task_status)})
         if response.status_code==200:
-            state.task_input = ""
             state.tasks=get_tasks()
 
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
-        print(f"Error adding task: {e}")
+        print(f"Error adding task: {e}\n{e.response.text}\n{state.task_name} and {state.task_status} and {type(state.task_status)}")
         return None
+
+def change_task_name(state: State, var_name: str, value):
+    state.task_name = value
 
 
 
@@ -71,10 +77,9 @@ def delete_task(state: State,var_name: str,payload):
         state.tasks=get_tasks()
 
     print(payload["index"])
-
-
-
     return response.json()
+
+
 
 def update_task(state:State,var_name: str,payload: dict):
     try:
@@ -102,7 +107,6 @@ def update_task(state:State,var_name: str,payload: dict):
 
 
 
-
 tasks=get_tasks()
 #Debug
 print(f"Tasks: {tasks}")
@@ -110,6 +114,11 @@ print(f"Tasks: {tasks}")
 #Page Content
 with tgb.Page() as page:
     tgb.text("## Task Management App",mode="md")
+    with tgb.layout("1fr 1fr auto",gap="1rem"):
+        tgb.input("{task_name}",label="Task Name",hover_text="Enter task name here...",width="100%",on_change=change_task_name)
+        tgb.toggle("{task_status}",label="Completed?",hover_text="Select if task is completed",allow_unselect=True)
+        tgb.button("Add Task",on_action=add_task, class_name="my-style")
+
     tgb.table("{tasks}",on_delete=delete_task, on_add=add_task,editable=True,columns=["Task Name","Status"],editable__ID=False,on_edit=update_task,use_checkbox=True)
 
 

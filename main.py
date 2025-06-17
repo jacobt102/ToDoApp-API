@@ -1,9 +1,11 @@
 import os
+from typing import Optional
 import mysql.connector
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
+from fastapi.middleware.cors import CORSMiddleware
 import requests
 
 #Load .env file
@@ -22,6 +24,12 @@ if host is None or user is None or password is None or database is None:
     raise HTTPException(status_code=500, detail="Missing environment variable")
 
 def db_connection():
+   """
+   Creates a database connection using the specified environment variables for host, user, password, and database.
+
+   Returns:
+   - A database connection object
+   """
 
    try:
        conn = mysql.connector.connect(
@@ -38,6 +46,12 @@ connection=db_connection()
 
 app = FastAPI()
 
+app.add_middleware(CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],)
+
 #Pydantic task models
 class Task(BaseModel):
     name: str = Field(...,min_length=1,max_length=100,description="Name of task between 1 and 100 chars")
@@ -46,6 +60,10 @@ class Task(BaseModel):
 class TaskResponse(Task):
     id: int
 
+#Model for patch method
+class UpdateTask(BaseModel):
+    name: Optional[str] = Field(None,min_length=1,max_length=100,description="Name of task between 1 and 100 chars")
+    status: Optional[bool] = None
 
 @app.post("/addtask", response_model=TaskResponse)
 def create_task(task: Task) -> TaskResponse | None:
@@ -108,11 +126,11 @@ def get_all_tasks(name: str = None, status:bool = None) -> list[TaskResponse] | 
         cursor=connection.cursor()
         #query includes  name and status
         if name is not None and status is not None:
-            query = "SELECT * from tasks where task_name = %s and status = %s"
+            query = "SELECT * from tasks where task_name LIKE %s and status = %s"
             values = (name,status)
             cursor.execute(query,values)
         elif name is not None and status is None:
-            query = "SELECT * from tasks where task_name = %s"
+            query = "SELECT * from tasks where task_name LIKE %s"
             values = (name,)
             cursor.execute(query,values)
         elif name is None and status is not None:
@@ -122,7 +140,7 @@ def get_all_tasks(name: str = None, status:bool = None) -> list[TaskResponse] | 
         elif name is None and status is None:
             query = "SELECT * from tasks"
             cursor.execute(query)
-
+    #Error handling
     except mysql.connector.errors.InterfaceError as e:
             raise HTTPException(status_code=500, detail=f"Database connection error: {e}")
     except mysql.connector.errors.ProgrammingError as e:
@@ -168,49 +186,16 @@ def get_task(task_id: int) -> TaskResponse:
     except mysql.connector.errors.IntegrityError as e:
         raise HTTPException(status_code=500, detail=f"Database constraint violation: {e}")
 
-@app.get("/tasks", response_model=list[TaskResponse])
-def get_tasks(search: str = None) -> list[TaskResponse] | None:
-    """
-    Get all tasks from the database, or search by a specific task name.
 
-    Args:
-    - search (str): optional, filter by task name
-
-    Returns:
-    - list[TaskResponse]: list of tasks with id, name and status
-
-    Raises:
-    - HTTPException: If there is a database connection, query, or constraint violation error.
-    """
-    try:
-        cursor = connection.cursor()
-
-        if search is not None:
-            query = "SELECT * from tasks where task_name = %s"
-            values = (search,)
-            cursor.execute(query,values)
-        else:
-            query = "SELECT * from tasks"
-            cursor.execute(query)
-        results = cursor.fetchall()
-    except mysql.connector.errors.InterfaceError as e:
-        raise HTTPException(status_code=500, detail=f"Database connection error: {e}")
-    except mysql.connector.errors.ProgrammingError as e:
-        raise HTTPException(status_code=500, detail=f"Database query error: {e}")
-    except mysql.connector.errors.IntegrityError as e:
-        raise HTTPException(status_code=500, detail=f"Database constraint violation: {e}")
-    finally:
-        cursor.close()
-    return [TaskResponse(id=row[0],name=row[1],status=row[2]) for row in results]
 
 @app.patch("/tasks/{task_id}", response_model=TaskResponse)
-def update_task(task_id: int, task: Task) -> TaskResponse | None:
+def update_task(task_id: int, task: UpdateTask) -> TaskResponse | None:
     """
     Update a specific task by ID in the database.
 
     Args:
     - task_id (int): The id of the task to update
-    - task (Task): The task object containing the task name and status
+    - task (UpdateTask): The UpdateTask object containing either name, status or both (both optional)
 
     Returns:
     - TaskResponse: The updated task with id, name and status
@@ -250,9 +235,15 @@ def update_task(task_id: int, task: Task) -> TaskResponse | None:
     except mysql.connector.errors.IntegrityError as e:
         connection.rollback()
         raise HTTPException(status_code=500, detail=f"Database constraint violation: {e}")
+    except ValidationError as e:
+        connection.rollback()
+        raise HTTPException(status_code=400, detail=f"Validation error: {e}")
     finally:
+        #Get updated task data to return
+        cursor.execute("SELECT * FROM tasks WHERE id = %s", (task_id,))
+        updated = cursor.fetchone()
         cursor.close()
-    return TaskResponse(id=task_id,name=task.name,status=task.status)
+    return TaskResponse(id=updated[0],name=updated[1],status=bool(updated[2]))
 
 @app.delete("/tasks/{task_id}", response_model=TaskResponse)
 def delete_task(task_id: int,status: bool = True) -> TaskResponse | None:
