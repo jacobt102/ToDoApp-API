@@ -23,21 +23,20 @@ def add_task(state: State,id: str,payload: dict):
     :return: JSON response
     """
     try:
-
-
+        #Make post request to backend API
         response = requests.post("http://127.0.0.1:8001/addtask", json={"name": state.task_name, "status": bool(state.task_status)})
         if response.status_code==200:
             state.tasks=get_tasks()
 
         response.raise_for_status()
         return response.json()
+    #Exception handling
     except requests.exceptions.RequestException as e:
         print(f"Error adding task: {e}\n{e.response.text}\n{state.task_name} and {state.task_status} and {type(state.task_status)}")
         return None
 
 def change_task_name(state: State, var_name: str, value):
     state.task_name = value
-
 
 
 def get_tasks(state: State=None):
@@ -52,7 +51,9 @@ def get_tasks(state: State=None):
     """
     response = requests.get("http://127.0.0.1:8001/tasks")
     ret_frame = pd.DataFrame(response.json())
+    #Rename columns
     ret_frame.rename(columns={"id": "ID", "name": "Task Name", "status": "Status"},inplace=True)
+    #Returns frame with all data; if frame is empty, return empty frame w/ col names
     return ret_frame if response.json() else pd.DataFrame(columns=["ID","Name","Status"])
 
 def delete_task(state: State,var_name: str,payload):
@@ -67,13 +68,14 @@ def delete_task(state: State,var_name: str,payload):
     Returns:
         The response of the API call as JSON.
     """
-    print(payload["index"])
-
+    #getting row number where delete button is pressed
     task_id = payload["index"]
+    #Getting ID for row number that was pressed in dataframe
     del_id = state.tasks.iloc[task_id]["ID"]
     response = requests.delete(f"http://127.0.0.1:8001/tasks/{del_id}")
     response.raise_for_status()
     if response.status_code==200:
+        #Update task list table
         state.tasks=get_tasks()
 
     print(payload["index"])
@@ -82,11 +84,24 @@ def delete_task(state: State,var_name: str,payload):
 
 
 def update_task(state:State,var_name: str,payload: dict):
+    """
+    Updates a task in the task API.
+
+    Args:
+        state (State): The state of the GUI.
+        var_name (str): The name of the variable to bind the result to. (unused but necessary for callback)
+        payload (dict): Payload sent by callback
+
+    Returns:
+        The response of the API call as JSON.
+    """
     try:
         new_value = payload["value"]
         #Get database ID to update
         update_id = state.tasks.iloc[payload["index"]]["ID"]
+        #Getting column name that was updated
         col_name = payload["col"]
+        #Updating column names with database column names
         if col_name == "Task Name":
             if not 1<=len(new_value)<=100:
                 raise ValueError("Task name must be between 1 and 100 characters")
@@ -94,7 +109,7 @@ def update_task(state:State,var_name: str,payload: dict):
         elif col_name == "Status":
             col_name = "status"
 
-        #Updating table
+        #Updating table of column name with new value input
         response = requests.patch(f"http://127.0.0.1:8001/tasks/{update_id}",json={col_name: new_value})
         response.raise_for_status()
         if response.status_code==200:
@@ -106,9 +121,10 @@ def update_task(state:State,var_name: str,payload: dict):
     return response.json()
 
 
-
+#Ensuring tasks are up-to-date on program reload
 tasks=get_tasks()
-#Debug
+
+#Debug print
 print(f"Tasks: {tasks}")
 
 #Page Content
@@ -122,12 +138,5 @@ with tgb.Page() as page:
     tgb.table("{tasks}",on_delete=delete_task, on_add=add_task,editable=True,columns=["Task Name","Status"],editable__ID=False,on_edit=update_task,use_checkbox=True)
 
 
-
-style = """
-
-.fullwidth{
-    width: 100%;
-}
-"""
-
+#Running GUI
 Gui(page).run(title="Task Management", use_reloader=True, watermark="Made by Jacob Turner")
