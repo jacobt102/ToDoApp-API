@@ -13,7 +13,7 @@ from contextlib import contextmanager, asynccontextmanager
 load_dotenv()
 
 # Gather environment variables for database connection
-ex_url = os.getenv("ex_url")  # Render provides this automatically
+ex_url = os.getenv("ex_url")
 host = os.getenv("host")
 user = os.getenv("user")
 password = os.getenv("pw")
@@ -169,6 +169,9 @@ def create_task(task: Task) -> TaskResponse:
 def get_all_tasks(name: str = None, status: bool = None) -> list[TaskResponse]:
     """
     Get all tasks from the database with optional filtering.
+    Returns:
+          A list of TaskResponse objects
+
     """
     try:
         with get_db_connection() as conn:
@@ -203,7 +206,8 @@ def get_all_tasks(name: str = None, status: bool = None) -> list[TaskResponse]:
 def get_task(task_id: int) -> TaskResponse:
     """
     Get a specific task by ID.
-    Returns a TaskResponse object.
+    Returns:
+        The specified task details (id,name, status)
     """
     try:
         with get_db_connection() as conn:
@@ -224,7 +228,8 @@ def get_task(task_id: int) -> TaskResponse:
 def update_task(task_id: int, task: UpdateTask) -> TaskResponse:
     """
     Update a specific task by ID.
-    returns the updated TaskResponse object
+    Returns:
+        An updated TaskResponse object
     """
     if task.name is None and task.status is None:
         raise HTTPException(status_code=400, detail="Must provide name or status to update")
