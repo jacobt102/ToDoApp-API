@@ -1,301 +1,288 @@
 import os
 from typing import Optional
-import mysql.connector
+import psycopg2
+from psycopg2.extras import RealDictCursor
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field, ValidationError
 from fastapi.middleware.cors import CORSMiddleware
-import requests
+from contextlib import contextmanager, asynccontextmanager
 
-#Load .env file
-if not load_dotenv():
-    print("No env variables found. Specify a environment variable in a .env file")
-    raise RuntimeError("No env variables were found")
+# Load .env file
+load_dotenv()
 
 # Gather environment variables for database connection
-host= os.getenv("host")
-user=os.getenv("user")
-password= os.getenv("password")
-database= os.getenv("database")
+ex_url = os.getenv("ex_url")  # Render provides this automatically
+host = os.getenv("host")
+user = os.getenv("user")
+password = os.getenv("pw")
+database = os.getenv("new_db")
+port = int(os.getenv("port", "5432"))
 
-#Ensure all environment variables are present
-if host is None or user is None or password is None or database is None:
-    raise HTTPException(status_code=500, detail="Missing environment variable")
+if not all([ex_url, host, user, password, database, port]):
+    raise ValueError("Missing environment variables")
 
-def db_connection():
-   """
-   Creates a database connection using the specified environment variables for host, user, password, and database.
+db_params = {
+        "host": ex_url,
+        "user": user,
+        "password": password,
+        "dbname": database,
+        "port": port
+    }
 
-   Returns:
-   - A database connection object
-   """
 
-   try:
-       conn = mysql.connector.connect(
-        host=host,
-        user=user,
-        password=password,
-        database=database)
-   except Exception as e:
-       print(e)
-       raise HTTPException(status_code=500, detail="Database connection error: {e}")
-   return conn
+@contextmanager
+def get_db_connection():
+    """
+    Context manager for database connections with proper cleanup.
+    """
+    conn = None
+    try:
 
-connection=db_connection()
+        # Using individual parameters
+        conn = psycopg2.connect(**db_params, cursor_factory=RealDictCursor,sslmode='require')
+        yield conn
+    except psycopg2.Error as e:
+        if conn:
+            conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Database connection error: {e}")
+    finally:
+        if conn:
+            conn.close()
 
-app = FastAPI()
 
-app.add_middleware(CORSMiddleware,
-    allow_origins=["127.0.0.1:5000"],
+def init_database(app1: FastAPI):
+    """
+    Initialize the database with the tasks table if it doesn't exist.
+    """
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                # Create tasks table if it doesn't exist
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS tasks (
+                        id SERIAL PRIMARY KEY,
+                        task_name VARCHAR(100) NOT NULL UNIQUE,
+                        status BOOLEAN DEFAULT FALSE
+                    )
+                """)
+
+                conn.commit()
+                print("Database initialized successfully")
+    except Exception as e:
+        print(f"Error initializing database: {e}")
+        raise
+
+async def lifespan(app: FastAPI):
+    init_database(app)
+    yield
+
+
+app = FastAPI(
+    title="Task Management API",
+    description="A simple task management API with PostgreSQL backend",
+    version="1.0.0",lifespan=lifespan
+)
+
+
+
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],)
+    allow_headers=["*"],
+)
 
-#Pydantic task models
+
+# Pydantic models
 class Task(BaseModel):
-    name: str = Field(...,min_length=1,max_length=100,description="Name of task between 1 and 100 chars")
+    name: str = Field(..., min_length=1, max_length=100, description="Name of task between 1 and 100 chars")
     status: bool = False
+
 
 class TaskResponse(Task):
     id: int
 
-#Model for patch method
+
 class UpdateTask(BaseModel):
-    name: Optional[str] = Field(None,min_length=1,max_length=100,description="Name of task between 1 and 100 chars")
+    name: Optional[str] = Field(None, min_length=1, max_length=100, description="Name of task between 1 and 100 chars")
     status: Optional[bool] = None
 
+
+@asynccontextmanager
+async def startup_event(app: FastAPI):
+    """Initialize database on startup."""
+    init_database()
+
+
+@app.get("/")
+async def root():
+    """Health check endpoint."""
+    return {"message": "Task Management API is running", "status": "healthy"}
+
+
+@app.get("/health")
+async def health_check():
+    """Detailed health check."""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT 1")
+                cursor.fetchone()
+        return {"status": "healthy", "database": "connected"}
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Database health check failed: {e}")
+
+
 @app.post("/addtask", response_model=TaskResponse)
-def create_task(task: Task) -> TaskResponse | None:
+def create_task(task: Task) -> TaskResponse:
     """
-    Adds a new task to the database.
-
-    Args:
-    - task (Task): The task object containing the task name and status.
-
-    Returns:
-    - TaskResponse: The created task with its id, name, and status.
-
-    Raises:
-    - HTTPException: If the task name already exists, or if there is a database connection, query, or constraint violation error.
+    Adds a new task to the database. Task name must be unique.
+    :return name, id and status of new task
     """
     try:
-        cursor = connection.cursor()
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                # Check if task name exists
+                cursor.execute("SELECT id FROM tasks WHERE task_name = %s", (task.name,))
+                if cursor.fetchone():
+                    raise HTTPException(status_code=400, detail="Task name already exists. Enter a task name that doesn't exist.")
 
-        #Check if task name exists
-        cursor.execute(f"SELECT id from tasks where task_name=%s", (task.name,))
-        exist = cursor.fetchone()
-        if exist:
-            raise HTTPException(status_code=400,detail="Task name already exists")
+                # Insert new task
+                cursor.execute(
+                    "INSERT INTO tasks (task_name, status) VALUES (%s, %s) RETURNING id",
+                    (task.name, task.status)
+                )
+                task_id = cursor.fetchone()['id']
+                conn.commit()
 
-        #Inserting into DB
-        values=(task.name, task.status)
-        query="INSERT INTO tasks (task_name, status) VALUES (%s, %s)"
-        cursor.execute(query, values)
-        connection.commit()
-        task_id=cursor.lastrowid
-    #Possible database errors
-    except mysql.connector.errors.InterfaceError as e:
-        connection.rollback()
-        raise HTTPException(status_code=500, detail=f"Database connection error: {e}")
-    except mysql.connector.errors.ProgrammingError as e:
-        connection.rollback()
-        raise HTTPException(status_code=500, detail=f"Database query error: {e}")
-    except mysql.connector.errors.IntegrityError as e:
-        connection.rollback()
-        raise HTTPException(status_code=500, detail=f"Database constraint violation: {e}")
-    finally:
-        cursor.close()
-    #Returns inserted object back with id, name and status
-    return TaskResponse(id=task_id, name=task.name, status=task.status)
+                return TaskResponse(id=task_id, name=task.name, status=task.status)
+
+    except psycopg2.Error as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {e}")
 
 
 @app.get("/tasks", response_model=list[TaskResponse])
-def get_all_tasks(name: str = None, status:bool = None) -> list[TaskResponse] | None:
+def get_all_tasks(name: str = None, status: bool = None) -> list[TaskResponse]:
     """
-    Get all tasks from the database. Can be filtered by name and status
-
-    Args:
-    - name (str): optional, filter by task name
-    - status (bool): optional, filter by task status
-
-    Returns:
-    - list[TaskResponse]: list of tasks with id,name and status
+    Get all tasks from the database with optional filtering.
     """
     try:
-        cursor=connection.cursor()
-        #query includes  name and status
-        if name is not None and status is not None:
-            query = "SELECT * from tasks where task_name LIKE %s and status = %s"
-            values = (name,status)
-            cursor.execute(query,values)
-        elif name is not None and status is None:
-            query = "SELECT * from tasks where task_name LIKE %s"
-            values = (name,)
-            cursor.execute(query,values)
-        elif name is None and status is not None:
-            query = "SELECT * from tasks where status = %s"
-            values = (status,)
-            cursor.execute(query,values)
-        elif name is None and status is None:
-            query = "SELECT * from tasks"
-            cursor.execute(query)
-    #Error handling
-    except mysql.connector.errors.InterfaceError as e:
-            raise HTTPException(status_code=500, detail=f"Database connection error: {e}")
-    except mysql.connector.errors.ProgrammingError as e:
-        raise HTTPException(status_code=500, detail=f"Database query error: {e}")
-    except mysql.connector.errors.IntegrityError as e:
-        raise HTTPException(status_code=500, detail=f"Database constraint violation: {e}")
-    else:
-        results = cursor.fetchall()
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                # Build query based on filters
+                query = "SELECT id, task_name, status FROM tasks WHERE 1=1"
+                params = []
 
-    finally:
-        cursor.close()
+                if name is not None:
+                    query += " AND task_name ILIKE %s"
+                    params.append(f"%{name}%")
 
-    if results is None:
-        return None
-    return [TaskResponse(id=row[0],name=row[1],status=row[2]) for row in results]
+                if status is not None:
+                    query += " AND status = %s"
+                    params.append(status)
+
+                query += " ORDER BY id DESC"
+
+                cursor.execute(query, params)
+                results = cursor.fetchall()
+
+                return [
+                    TaskResponse(id=row['id'], name=row['task_name'], status=row['status'])
+                    for row in results
+                ]
+
+    except psycopg2.Error as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {e}")
+
 
 @app.get("/tasks/{task_id}", response_model=TaskResponse)
 def get_task(task_id: int) -> TaskResponse:
     """
-    Get a specific task by ID from the database.
-
-    Args:
-    - task_id (int): The id of the task to retrieve
-
-    Returns:
-    - TaskResponse: The task object with id, name and status
-
-    Raises:
-    - HTTPException: If task ID not found, or if there is a database connection, query, or constraint violation error.
+    Get a specific task by ID.
+    Returns a TaskResponse object.
     """
     try:
-        cursor = connection.cursor()
-        value = (task_id,)
-        cursor.execute("SELECT * from tasks where id = %s",value)
-        results = cursor.fetchone()
-        if not results:
-            raise HTTPException(status_code=404,detail=f"Specific Task ID {task_id} not found")
-        return TaskResponse(id=results[0],name=results[1],status=results[2])
-    except mysql.connector.errors.InterfaceError as e:
-        raise HTTPException(status_code=500, detail=f"Database connection error: {e}")
-    except mysql.connector.errors.ProgrammingError as e:
-        raise HTTPException(status_code=500, detail=f"Database query error: {e}")
-    except mysql.connector.errors.IntegrityError as e:
-        raise HTTPException(status_code=500, detail=f"Database constraint violation: {e}")
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT id, task_name, status FROM tasks WHERE id = %s", (task_id,))
+                result = cursor.fetchone()
 
+                if not result:
+                    raise HTTPException(status_code=404, detail=f"Task ID {task_id} not found")
+
+                return TaskResponse(id=result['id'], name=result['task_name'], status=result['status'])
+
+    except psycopg2.Error as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {e}")
 
 
 @app.patch("/tasks/{task_id}", response_model=TaskResponse)
-def update_task(task_id: int, task: UpdateTask) -> TaskResponse | None:
+def update_task(task_id: int, task: UpdateTask) -> TaskResponse:
     """
-    Update a specific task by ID in the database.
-
-    Args:
-    - task_id (int): The id of the task to update
-    - task (UpdateTask): The UpdateTask object containing either name, status or both (both optional)
-
-    Returns:
-    - TaskResponse: The updated task with id, name and status
-
-    Raises:
-    - HTTPException: If task ID not found, or if there is a database connection, query, or constraint violation error.
+    Update a specific task by ID.
+    returns the updated TaskResponse object
     """
+    if task.name is None and task.status is None:
+        raise HTTPException(status_code=400, detail="Must provide name or status to update")
+
     try:
-        cursor = connection.cursor()
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                # Check if task exists
+                cursor.execute("SELECT id FROM tasks WHERE id = %s", (task_id,))
+                if not cursor.fetchone():
+                    raise HTTPException(status_code=404, detail=f"Task ID {task_id} not found")
 
-        #Check if task ID exists
-        cursor.execute(f"SELECT id from tasks where id=%s", (task_id,))
-        exist = cursor.fetchone()
-        if not exist:
-            raise HTTPException(status_code=404,detail=f"Specific Task ID {task_id} not found")
+                # Build update query
+                updates = []
+                params = []
 
-        if task.name is not None and task.status is not None:
-            value = (task.name, task.status, task_id)
-            query = "UPDATE tasks SET task_name = %s, status = %s WHERE id = %s"
-        elif task.name is not None and task.status is None:
-            value = (task.name, task_id)
-            query = "UPDATE tasks SET task_name = %s WHERE id = %s"
-        elif task.name is None and task.status is not None:
-            value = (task.status, task_id)
-            query = "UPDATE tasks SET status = %s WHERE id = %s"
-        elif task.name is None and task.status is None:
-            raise HTTPException(status_code=400,detail="No task name or status provided. Must provide name or status to update task")
-        cursor.execute(query,value)
-        connection.commit()
-    #database error catching
-    except mysql.connector.errors.InterfaceError as e:
-        connection.rollback()
-        raise HTTPException(status_code=500, detail=f"Database connection error: {e}")
-    except mysql.connector.errors.ProgrammingError as e:
-        connection.rollback()
-        raise HTTPException(status_code=500, detail=f"Database query error: {e}")
-    except mysql.connector.errors.IntegrityError as e:
-        connection.rollback()
-        raise HTTPException(status_code=500, detail=f"Database constraint violation: {e}")
-    except ValidationError as e:
-        connection.rollback()
-        raise HTTPException(status_code=400, detail=f"Validation error: {e}")
-    finally:
-        #Get updated task data to return
-        cursor.execute("SELECT * FROM tasks WHERE id = %s", (task_id,))
-        updated = cursor.fetchone()
-        cursor.close()
-    return TaskResponse(id=updated[0],name=updated[1],status=bool(updated[2]))
+                if task.name is not None:
+                    updates.append("task_name = %s")
+                    params.append(task.name)
+
+                if task.status is not None:
+                    updates.append("status = %s")
+                    params.append(task.status)
+
+                params.append(task_id)
+
+                query = f"UPDATE tasks SET {', '.join(updates)} WHERE id = %s RETURNING id, task_name, status"
+                cursor.execute(query, params)
+
+                result = cursor.fetchone()
+                conn.commit()
+
+                return TaskResponse(id=result['id'], name=result['task_name'], status=result['status'])
+
+    except psycopg2.Error as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {e}")
+
 
 @app.delete("/tasks/{task_id}", response_model=TaskResponse)
-def delete_task(task_id: int,status: bool = True) -> TaskResponse | None:
+def delete_task(task_id: int) -> TaskResponse:
     """
-    Delete a specific task by ID from the database.
-
-    Args:
-    - task_id (int): The id of the task to delete
-
-    Returns:
-    - TaskResponse: The deleted task with id, name and status
-
-    Raises:
-    - HTTPException: If task ID not found, or if there is a database connection, query, or constraint violation error.
+    Delete a specific task by ID. Returns the deleted task.
     """
     try:
-        cursor = connection.cursor()
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                # Get task data before deletion
+                cursor.execute("SELECT id, task_name, status FROM tasks WHERE id = %s", (task_id,))
+                result = cursor.fetchone()
 
-        #Check if task ID exists
-        cursor.execute(f"SELECT id from tasks where id=%s", (task_id,))
-        exist = cursor.fetchone()
-        if not exist:
-            raise HTTPException(status_code=404,detail=f"Specific Task ID {task_id} not found")
+                if not result:
+                    raise HTTPException(status_code=404, detail=f"Task ID {task_id} not found")
 
-        #Get task data to return:
-        cursor.execute(f"SELECT * from tasks where id=%s", (task_id,))
-        results = cursor.fetchone()
-        if results:
-            name = results[1]
-            status = results[2]
+                # Delete the task
+                cursor.execute("DELETE FROM tasks WHERE id = %s", (task_id,))
+                conn.commit()
 
+                return TaskResponse(id=result['id'], name=result['task_name'], status=result['status'])
 
-
-
-        #Delete task
-        cursor.execute(f"DELETE from tasks where id=%s", (task_id,))
-        connection.commit()
-    #database error catching
-    except mysql.connector.errors.InterfaceError as e:
-        connection.rollback()
-        raise HTTPException(status_code=500, detail=f"Database connection error: {e}")
-    except mysql.connector.errors.ProgrammingError as e:
-        connection.rollback()
-        raise HTTPException(status_code=500, detail=f"Database query error: {e}")
-    except mysql.connector.errors.IntegrityError as e:
-        connection.rollback()
-        raise HTTPException(status_code=500, detail=f"Database constraint violation: {e}")
-    finally:
-        cursor.close()
-    return TaskResponse(id=task_id,name=name, status=status)
-
-if __name__ == '__main__':
-    uvicorn.run(app, host="127.0.0.1", port=8001)
-
-
+    except psycopg2.Error as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {e}")
