@@ -137,7 +137,7 @@ async def health_check():
         raise HTTPException(status_code=503, detail=f"Database health check failed: {e}")
 
 
-@app.post("/addtask", response_model=TaskResponse)
+@app.post("/tasks", response_model=TaskResponse, status_code=201)
 def create_task(task: Task) -> TaskResponse:
     """
     Adds a new task to the database. Task name must be unique.
@@ -188,6 +188,7 @@ def get_all_tasks(name: str = None, status: bool = None) -> list[TaskResponse]:
                     query += " AND status = %s"
                     params.append(status)
 
+                # Have most recent tasks first
                 query += " ORDER BY id DESC"
 
                 cursor.execute(query, params)

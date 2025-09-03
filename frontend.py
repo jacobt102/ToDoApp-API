@@ -5,9 +5,10 @@ import pandas as pd
 from typing import Optional
 
 # Configuration
-API_BASE_URL = "http://127.0.0.1:8001"
+API_BASE_URL = "https://todoapp-api-92h6.onrender.com"
 
 # Initial state variables
+
 task_name = ""
 task_status = False
 filter_name = ""
@@ -50,8 +51,7 @@ def get_tasks(state: Optional[State] = None, name_filter: str = "",
         df.rename(columns={"id": "ID", "name": "Task Name", "status": "Status"}, inplace=True)
 
         # Convert status to readable format
-        df["Status"] = df["Status"].map({True: "✅ Completed", False: "⏳ Pending"})
-
+        df["Status"] = df["Status"].map({True: "Completed", False: "Pending"})
         return df
 
     except requests.exceptions.RequestException as e:
@@ -69,7 +69,7 @@ def add_task(state: State, id: str, payload: dict) -> None:
 
     try:
         response = requests.post(
-            f"{API_BASE_URL}/addtask",
+            f"{API_BASE_URL}/tasks",
             json={"name": state.task_name.strip(), "status": bool(state.task_status)},
             timeout=5
         )
@@ -78,10 +78,10 @@ def add_task(state: State, id: str, payload: dict) -> None:
             state.task_name = ""  # Clear input
             state.task_status = False  # Reset status
             refresh_tasks(state)
-            notify(state, "success", f"Task '{response.json()['name']}' added successfully")
+            notify(state, "success", f"Task '{response.json()['name']}' added successfully",duration=3000)
         else:
             error_msg = response.json().get("detail", "Unknown error")
-            notify(state, "error", f"Failed to add task: {error_msg}")
+            notify(state, "error", f"Failed to add task: {error_msg}",duration=3000)
 
     except requests.exceptions.RequestException as e:
         print(f"Error adding task: {e}")
@@ -107,7 +107,7 @@ def update_task(state: State, var_name: str, payload: dict) -> None:
 
         # Handle status conversion
         if api_field == "status":
-            new_value = new_value == "✅ Completed"
+            new_value = new_value == "Completed"
         elif api_field == "name" and not (1 <= len(new_value.strip()) <= 100):
             notify(state, "error", "Task name must be between 1 and 100 characters")
             return
@@ -192,7 +192,7 @@ def on_task_name_change(state: State, var_name: str, value) -> None:
 # Initialize tasks on startup
 tasks = get_tasks()
 
-# Define custom CSS for better styling
+
 
 
 # Build the page
@@ -209,12 +209,11 @@ This task management system allows you to:
 - Delete tasks
 - Filter tasks by name and status
 
-##How to Use
-1. Enter a task name in the input field and its status and click the "Add Task" button
-2. Use the table to edit task details
-3. Use the filter options to view specific task status or names
-         
-        """
+##  How to Use
+1. **Add a task**: Enter a task name, set its status, and click "Add Task"
+2. **Edit tasks**: Click any task to modify its details
+3. **Find tasks**: Use the filter options to view specific task status or names
+"""
         tgb.text("{header}", mode="md")
     # Statistics row
     tgb.text("### Task Statistics", mode="md")
@@ -230,6 +229,7 @@ This task management system allows you to:
             tgb.text("**Pending**", mode="md")
             tgb.text("{len(tasks[tasks['Status'].str.contains('Pending', na=False)])}")
 
+    tgb.text("___", mode="md")
 
     # Add task section
     with tgb.part(class_name="add-task-section"):
@@ -238,7 +238,6 @@ This task management system allows you to:
             tgb.input(
                 "{task_name}",
                 label="Task Name",
-                placeholder="Enter your task here...",
                 on_change=on_task_name_change
             )
             tgb.toggle(
